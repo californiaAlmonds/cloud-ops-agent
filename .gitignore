@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Nested standalone service git repos
+services/*/.git/
+services/
+
+# Generated runtime artifacts & local session history
+artifacts/
+data/conversations.json
+concepts_brief.md
+consolidated_review_report.md
+design_draft.md
+goldfish_review_report.md
+
+# Secrets & local env
+.env
+*.pem
+*.key

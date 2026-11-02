@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cloud Ops Agent — AWS Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app-layout" id="appLayout">
+    <!-- Mobile Sidebar Backdrop -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop" hidden></div>
+
+    <!-- Left Sidebar: Brand, New Chat, Conversation History, Connection Status -->
+    <aside class="chat-sidebar" id="chatSidebar" aria-label="Sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-brand">
+          <div class="brand-logo" aria-hidden="true">⚡</div>
+          <div class="brand-text">
+            <h1 class="brand-title">Cloud Ops Agent</h1>
+            <span class="brand-subtitle">AWS Assistant</span>
+          </div>
+          <button
+            type="button"
+            class="btn-icon mobile-close-sidebar"
+            id="btnCloseSidebar"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+            aria-expanded="true"
+            aria-controls="chatSidebar"
+          >
+            <span aria-hidden="true">«</span>
+          </button>
+        </div>
+
+        <button type="button" class="btn-new-chat" id="btnNewChat">
+          <span class="plus-icon" aria-hidden="true">+</span>
+          <span>New Chat</span>
+        </button>
+      </div>
+
+      <div class="sidebar-history-section">
+        <div class="sidebar-section-label">Recent Conversations</div>
+        <nav
+          class="conversation-list"
+          id="conversationList"
+          aria-label="Conversation History"
+        ></nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="connection-badge" id="connectionBadge">
+          <span class="status-dot status-dot-online" id="connectionDot" aria-hidden="true"></span>
+          <span id="connectionText">Connected to AWS • Gemini</span>
+        </div>
+        <div class="runtime-mode-pill" id="runtimeModeText">
+          gemini-3.8-flash • us-east-1
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-main">
+      <!-- Top Bar -->
+      <header class="chat-topbar">
+        <div class="topbar-left">
+          <button
+            type="button"
+            class="btn-icon sidebar-toggle-btn"
+            id="btnToggleSidebar"
+            aria-label="Toggle conversation sidebar"
+            title="Toggle conversation sidebar"
+            aria-expanded="true"
+            aria-controls="chatSidebar"
+          >
+            <span class="toggle-icon" aria-hidden="true">☰</span>
+            <span class="toggle-label">History</span>
+          </button>
+          <h2 class="active-conv-title" id="activeConvTitle">New Conversation</h2>
+        </div>
+
+        <div class="topbar-right">
+          <button type="button" class="btn-top-action" id="btnTopNewChat">
+            <span aria-hidden="true">+</span> New Chat
+          </button>
+        </div>
+      </header>
+
+      <!-- Scrollable Chat Viewport -->
+      <div class="chat-scroll-wrap" id="chatScrollWrap">
+        <div class="chat-stream-container">
+          <!-- Welcome Empty State (shown when conversation has 0 messages) -->
+          <section class="empty-chat-state" id="emptyChatState" aria-label="Welcome and Starter Prompts">
+            <div class="welcome-hero">
+              <div class="welcome-badge" aria-hidden="true">⚡</div>
+              <h2 class="welcome-title">How can I help with your AWS environment today?</h2>
+              <p class="welcome-subtitle">
+                I can check live ECS service health, investigate CloudWatch error logs and deployment diffs,
+                run guardrailed AWS commands, or generate visual metric charts, Excel event sheets, and Word incident reports.
+              </p>
+            </div>
+
+            <div class="starter-cards-grid" id="starterCardsGrid">
+              <button
+                type="button"
+                class="starter-card"
+                data-prompt="Are all our AWS services healthy right now? Check if anything is failing."
+              >
+                <span class="starter-card-icon" aria-hidden="true">🩺</span>
+                <div class="starter-card-body">
+                  <strong>Check AWS Service Health</strong>
+                  <p>Are all our AWS services healthy right now? Check if anything is failing.</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                class="starter-card"
+                data-prompt="Why is salescreate-api returning 503 errors? Show me a chart and fix."
+              >
+                <span class="starter-card-icon" aria-hidden="true">🔍</span>
+                <div class="starter-card-body">
+                  <strong>Diagnose Errors &amp; Propose Fix</strong>
+                  <p>Why is salescreate-api returning 503 errors? Show me a chart and fix.</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                class="starter-card"
+                data-prompt="Export recent service events into an Excel sheet and a Word report."
+              >
+                <span class="starter-card-icon" aria-hidden="true">📊</span>
+                <div class="starter-card-body">
+                  <strong>Export Excel &amp; Word Reports</strong>
+                  <p>Export recent service events into an Excel sheet and a Word report.</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                class="starter-card"
+                data-prompt="Scale salescreate-api to 1 task for off-business hours."
+              >
+                <span class="starter-card-icon" aria-hidden="true">⚖️</span>
+                <div class="starter-card-body">
+                  <strong>Scale Service Capacity</strong>
+                  <p>Scale salescreate-api to 1 task for off-business hours.</p>
+                </div>
+              </button>
+            </div>
+          </section>
+
+          <!-- Message Stream -->
+          <div
+            class="chat-messages"
+            id="chatMessages"
+            role="log"
+            aria-live="polite"
+          ></div>
+        </div>
+      </div>
+
+      <!-- Bottom Multimodal Composer -->
+      <footer class="chat-composer">
+        <div class="composer-container" id="composerDropZone">
+          <!-- Attachment Preview Strip -->
+          <div class="attachment-strip hidden" id="attachmentStrip" aria-label="Attached files"></div>
+
+          <form class="composer-input-bar" id="chatForm">
+            <input
+              type="file"
+              id="fileInput"
+              class="sr-only"
+              multiple
+              accept="image/*,.txt,.md,.json,.log,.csv,.yaml,.yml,.svg"
+            />
+            <button
+              type="button"
+              class="btn-composer-attach"
+              id="btnAttach"
+              aria-label="Attach image, log, or runbook file"
+            >
+              <span aria-hidden="true">📎</span>
+            </button>
+
+            <label for="chatInput" class="sr-only">Message Cloud Ops Agent</label>
+            <textarea
+              id="chatInput"
+              class="composer-textarea"
+              rows="1"
+              placeholder="Ask about your AWS services, logs, deployments, or request an Excel/Word report..."
+            ></textarea>
+
+            <button
+              type="submit"
+              class="btn-composer-send"
+              id="btnSend"
+              aria-label="Send message"
+            >
+              <span>Send</span>
+              <span aria-hidden="true">↑</span>
+            </button>
+          </form>
+
+          <div class="composer-footnote">
+            Mutating AWS ECS actions always pause for your approval before executing. Click any command drawer to inspect raw AWS CLI &amp; MCP calls.
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Lightbox Dialog for Full-Resolution Chart / Image Inspection -->
+  <dialog id="imagePreviewDialog" class="preview-dialog" closedby="any" aria-labelledby="previewDialogTitle">
+    <form method="dialog" class="preview-dialog-content">
+      <div class="preview-dialog-header">
+        <h3 id="previewDialogTitle" class="preview-dialog-title">Chart &amp; Diagram Preview</h3>
+        <button type="submit" id="btnCloseDialog" class="btn-icon" aria-label="Close preview">✕</button>
+      </div>
+      <div class="preview-dialog-body">
+        <img id="previewDialogImg" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Expanded visual artifact preview" class="preview-dialog-img" />
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloud-ops-agent"
+version = "1.0.0"
+description = "Cloud Ops Agent — Autonomous SRE & Cloud Infrastructure Operations System with Multi-Agent Orchestration, MCP Tooling, Safety Guardrails, and Multimodal Reporting"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Cloud Ops SRE Platform Team" }
+]
+keywords = ["sre", "cloud-ops", "multi-agent", "mcp", "observability", "incident-response", "gemini"]
+dependencies = []
+
+[project.optional-dependencies]
+gemini = [
+    "google-genai>=1.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+cloud-ops = "cloud_ops.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"cloud_ops.ui" = ["*.html", "*.css", "*.js"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

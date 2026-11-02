@@ -1,0 +1,83 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvestigatorAndVerifierReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:ListClusters",
+        "ecs:DescribeClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks",
+        "ecs:ListTaskDefinitions",
+        "ecs:DescribeTaskDefinition",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:StartQuery",
+        "logs:GetQueryResults",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:DescribeAlarms",
+        "iam:GetRole",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RemediatorAllowlistedWriteOnDemoCluster",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:RegisterTaskDefinition"
+      ],
+      "Resource": [
+        "arn:aws:ecs:*:*:cluster/cloud-ops-demo-cluster",
+        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/*",
+        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/salescreate-api",
+        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/inventory-worker",
+        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/notifier",
+        "arn:aws:ecs:*:*:task-definition/*:*",
+        "arn:aws:ecs:*:*:task-definition/salescreate-api:*",
+        "arn:aws:ecs:*:*:task-definition/inventory-worker:*",
+        "arn:aws:ecs:*:*:task-definition/notifier:*"
+      ]
+    },
+    {
+      "Sid": "PassTaskExecutionRoleOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/cloud-ops-ecs-execution-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ExplicitDenyDestructiveOperations",
+      "Effect": "Deny",
+      "Action": [
+        "ecs:DeleteCluster",
+        "ecs:DeleteService",
+        "ecs:DeregisterTaskDefinition",
+        "logs:DeleteLogGroup",
+        "logs:DeleteLogStream",
+        "ecr:DeleteRepository",
+        "iam:CreateUser",
+        "iam:DeleteRole",
+        "iam:AttachRolePolicy"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

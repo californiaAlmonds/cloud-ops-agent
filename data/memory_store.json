@@ -1,0 +1,154 @@
+{
+  "updated_at": "2026-10-26T14:15:38Z",
+  "past_incidents": [
+    {
+      "incident_id": "INC-2026-1101",
+      "title": "salescreate-api incident: bad-release (35.0% errors)",
+      "service": "salescreate-api",
+      "scenario": "bad-release",
+      "occurred_at": "2026-10-26T14:15:38Z",
+      "resolved_at": "2026-10-26T14:15:38Z",
+      "error_signature": "KeyError: 'discount_tier' in checkout_pricing.calculate_tier_discount (introduced in v2.4.1-bad)",
+      "root_cause": "Active task definition salescreate-api:15 on salescreate-api introduced configuration/release drift (RELEASE_VERSION: 'v2.4.0' -> 'v2.4.1-bad') compared to healthy baseline salescreate-api:14, triggering KeyError: KeyError: 'discount_tier' in checkout_pricing.calculate_tier_discount (introduced in v2.4.1-bad).",
+      "resolution": "Roll back salescreate-api task definition from salescreate-api:15 to healthy baseline salescreate-api:14",
+      "remediation_tool": "rollback_task_definition",
+      "mttr_minutes": 3,
+      "verified": true,
+      "tags": [
+        "salescreate-api",
+        "bad-release",
+        "verified"
+      ]
+    },
+    {
+      "incident_id": "INC-2026-0912",
+      "title": "Notifier SMTP Relay Auth Failure After Secrets Manager Rotation",
+      "service": "notifier",
+      "scenario": "secret-rotation-mismatch",
+      "occurred_at": "2026-09-12T04:18:00Z",
+      "error_signature": "SecretAuthError: SMTP relay rejected credentials for SMTP_SECRET_ID=sec_2026_09_revoked",
+      "root_cause": "AWS Secrets Manager automatically rotated the SMTP relay credential to sec_2026_10_active, but the notifier ECS task definition remained pinned to revoked secret ID sec_2026_09_revoked.",
+      "resolution": "Updated SMTP_SECRET_ID=sec_2026_10_active via update_service_env on notifier and forced a new deployment.",
+      "remediation_tool": "update_service_env",
+      "mttr_minutes": 6,
+      "verified": true,
+      "tags": [
+        "secrets-manager",
+        "smtp",
+        "notifier",
+        "503"
+      ]
+    },
+    {
+      "incident_id": "INC-2026-0928",
+      "title": "SalesCreate API Checkout Pricing KeyError Regression in Canary Release",
+      "service": "salescreate-api",
+      "scenario": "bad-release",
+      "occurred_at": "2026-09-28T14:42:00Z",
+      "error_signature": "KeyError: 'discount_tier' in checkout_pricing.calculate_tier_discount",
+      "root_cause": "Canary deployment v2.4.1-bad accessed payload['customer']['discount_tier'] directly without a default fallback, causing HTTP 500 errors on ~35% of guest/standard checkout orders.",
+      "resolution": "Rolled back salescreate-api task definition from revision salescreate-api:15 (v2.4.1-bad) to healthy baseline revision salescreate-api:14 (v2.4.0).",
+      "remediation_tool": "rollback_task_definition",
+      "mttr_minutes": 4,
+      "verified": true,
+      "tags": [
+        "canary",
+        "rollback",
+        "keyerror",
+        "salescreate-api",
+        "500"
+      ]
+    },
+    {
+      "incident_id": "INC-2026-1004",
+      "title": "Inventory Worker Row Lock Contention on Hot SKU-9901",
+      "service": "inventory-worker",
+      "scenario": "lock-contention",
+      "occurred_at": "2026-10-04T19:05:00Z",
+      "error_signature": "DeadlockDetectedError: Pessimistic lock wait timeout (30ms) exceeded on table inventory_ledger for hot SKU-9901",
+      "root_cause": "Task definition override lowered LOCK_TIMEOUT_MS to 30ms (vs 1500ms baseline), causing 60% of concurrent stock reservations on hot SKU-9901 to abort with DeadlockDetectedError.",
+      "resolution": "Restored LOCK_TIMEOUT_MS=1500 via update_service_env on inventory-worker.",
+      "remediation_tool": "update_service_env",
+      "mttr_minutes": 5,
+      "verified": true,
+      "tags": [
+        "database",
+        "lock-contention",
+        "inventory-worker",
+        "sku-9901"
+      ]
+    }
+  ],
+  "environment_memory": {
+    "cluster": "cloud-ops-demo-cluster",
+    "region": "us-east-1",
+    "dependency_chain": "salescreate-api -> inventory-worker -> notifier",
+    "services": {
+      "salescreate-api": {
+        "tier": "tier-1-critical",
+        "upstream": [
+          "alb-public-ingress"
+        ],
+        "downstream": [
+          "inventory-worker"
+        ],
+        "datastores": [
+          "rds-sales-prod.internal:5432"
+        ],
+        "baseline_revision": "salescreate-api:14",
+        "baseline_release": "v2.4.0"
+      },
+      "inventory-worker": {
+        "tier": "tier-1-worker",
+        "upstream": [
+          "salescreate-api"
+        ],
+        "downstream": [
+          "notifier",
+          "erp-warehouse.internal"
+        ],
+        "queues": [
+          "sales-inventory-events.fifo"
+        ],
+        "baseline_revision": "inventory-worker:9",
+        "baseline_release": "v1.8.0"
+      },
+      "notifier": {
+        "tier": "tier-2-notification",
+        "upstream": [
+          "inventory-worker"
+        ],
+        "downstream": [
+          "aws-ses",
+          "hooks.slack-sim.internal"
+        ],
+        "secrets": [
+          "sec_2026_10_active"
+        ],
+        "baseline_revision": "notifier:11",
+        "baseline_release": "v3.1.0"
+      }
+    },
+    "sla_targets": {
+      "max_error_rate_pct": 1.0,
+      "p95_latency_ms": 100,
+      "memory_utilization_max_pct": 85.0
+    },
+    "business_hours_policy": {
+      "timezone": "IST (UTC+05:30)",
+      "business_hours": {
+        "window": "08:00-20:00 IST",
+        "desired_count": 2,
+        "description": "High-availability active-active posture across 2 tasks during peak business hours."
+      },
+      "off_business_hours": {
+        "window": "20:00-07:00 IST",
+        "desired_count_prod": 1,
+        "desired_count_free_plan": 0,
+        "recommended_desired_count": 1,
+        "description": "Off-business hours cost-optimization policy (20:00-07:00 IST): scale down to desired_count=0 on AWS Free Plan / lab environments or desired_count=1 in production minimal standby."
+      }
+    }
+  },
+  "scaling_history": []
+}
