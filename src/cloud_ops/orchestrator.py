@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from typing import Any
@@ -37,6 +38,7 @@ from cloud_ops.reporting.pir_generator import (
 from cloud_ops.schemas import (
     ArtifactRecord,
     IncidentRecord,
+    RemediationProposal,
     VerificationReport,
     utc_now_iso,
 )
@@ -100,10 +102,132 @@ class CloudOpsOrchestrator:
         self.incidents: dict[str, IncidentRecord] = {}
         self.active_incident_id: str | None = None
         self._incident_seq = 1100
+        self._rehydrate_incidents_from_conversations()
 
     def _next_incident_id(self) -> str:
         self._incident_seq += 1
         return f"INC-2026-{self._incident_seq:04d}"
+
+    @staticmethod
+    def _proposal_from_dict(prop_data: dict[str, Any], fallback_incident_id: str) -> RemediationProposal:
+        inc_id = str(prop_data.get("incident_id") or fallback_incident_id)
+        return RemediationProposal(
+            proposal_id=str(prop_data.get("proposal_id") or f"PROP-{inc_id}"),
+            incident_id=inc_id,
+            service=str(prop_data.get("service") or "salescreate-api"),
+            title=str(prop_data.get("title") or "Proposed AWS Service Change"),
+            action_type=str(prop_data.get("action_type") or "ROLLBACK_TASK_DEFINITION"),
+            mcp_tool=str(prop_data.get("mcp_tool") or "rollback_task_definition"),
+            parameters=dict(prop_data.get("parameters") or {}),
+            aws_cli_equivalent=str(prop_data.get("aws_cli_equivalent") or ""),
+            blast_radius=str(prop_data.get("blast_radius") or ""),
+            rollback_plan=str(prop_data.get("rollback_plan") or ""),
+            requires_approval=bool(prop_data.get("requires_approval", True)),
+            status=str(prop_data.get("status") or "PENDING_APPROVAL"),
+        )
+
+    def _rehydrate_incidents_from_conversations(self) -> None:
+        """Restore IncidentRecord entries from persisted conversations so Approve/Cancel survive restarts."""
+        seq_re = re.compile(r"INC-\d{4}-(\d+)")
+        for sess in self.conversation_store._sessions.values():
+            for msg in sess.messages:
+                inc_id = msg.incident_id or (msg.proposal or {}).get("incident_id")
+                if not inc_id:
+                    continue
+                m = seq_re.search(str(inc_id))
+                if m:
+                    self._incident_seq = max(self._incident_seq, int(m.group(1)))
+                if isinstance(msg.proposal, dict):
+                    prop = self._proposal_from_dict(msg.proposal, str(inc_id))
+                    existing = self.incidents.get(str(inc_id))
+                    if existing is None or prop.status == "PENDING_APPROVAL":
+                        svc = prop.service or sess.active_service or "salescreate-api"
+                        self.incidents[str(inc_id)] = IncidentRecord(
+                            incident_id=str(inc_id),
+                            title=prop.title,
+                            service=svc,
+                            scenario=self.cloudwatch.get_service_scenario(svc),
+                            status=prop.status,
+                            created_at=msg.created_at or sess.created_at,
+                            updated_at=sess.updated_at,
+                            investigation=None,
+                            proposal=prop,
+                            verification=None,
+                            artifacts=[],
+                            audit_trail=[],
+                        )
+                        if self.active_incident_id is None:
+                            self.active_incident_id = str(inc_id)
+
+    def _resolve_incident(
+        self,
+        incident_id: str,
+        conversation_id: str | None = None,
+    ) -> IncidentRecord:
+        """Resolve an IncidentRecord from memory or persisted conversation messages."""
+        if conversation_id:
+            sess = self.conversation_store.get_conversation(conversation_id)
+            if sess is not None:
+                for msg in reversed(sess.messages):
+                    msg_inc_id = msg.incident_id or (msg.proposal or {}).get("incident_id")
+                    if msg_inc_id == incident_id and isinstance(msg.proposal, dict):
+                        prop = self._proposal_from_dict(msg.proposal, incident_id)
+                        existing = self.incidents.get(incident_id)
+                        if existing is not None:
+                            existing.proposal = prop
+                            existing.service = prop.service or existing.service
+                            return existing
+                        reconstructed = IncidentRecord(
+                            incident_id=incident_id,
+                            title=prop.title,
+                            service=prop.service or sess.active_service or "salescreate-api",
+                            scenario=self.cloudwatch.get_service_scenario(
+                                prop.service or sess.active_service or "salescreate-api"
+                            ),
+                            status=prop.status,
+                            created_at=msg.created_at or sess.created_at,
+                            updated_at=sess.updated_at,
+                            investigation=None,
+                            proposal=prop,
+                            verification=None,
+                            artifacts=[],
+                            audit_trail=[],
+                        )
+                        self.incidents[incident_id] = reconstructed
+                        return reconstructed
+
+        if incident_id in self.incidents:
+            return self.incidents[incident_id]
+
+        # Scan all persisted conversations for matching incident_id or proposal_id
+        for sess in self.conversation_store._sessions.values():
+            for msg in reversed(sess.messages):
+                prop_dict = msg.proposal if isinstance(msg.proposal, dict) else {}
+                if (
+                    msg.incident_id == incident_id
+                    or prop_dict.get("incident_id") == incident_id
+                    or prop_dict.get("proposal_id") == incident_id
+                ):
+                    prop = self._proposal_from_dict(prop_dict, incident_id)
+                    svc = prop.service or sess.active_service or "salescreate-api"
+                    reconstructed = IncidentRecord(
+                        incident_id=incident_id,
+                        title=prop.title,
+                        service=svc,
+                        scenario=self.cloudwatch.get_service_scenario(svc),
+                        status=prop.status,
+                        created_at=msg.created_at or sess.created_at,
+                        updated_at=sess.updated_at,
+                        investigation=None,
+                        proposal=prop,
+                        verification=None,
+                        artifacts=[],
+                        audit_trail=[],
+                    )
+                    self.incidents[incident_id] = reconstructed
+                    return reconstructed
+
+        raise KeyError(f"Unknown incident_id '{incident_id}'")
 
     # -------------------------------------------------------------------------
     # Core Incident Lifecycle Methods
@@ -239,6 +363,28 @@ class CloudOpsOrchestrator:
     def _enrich_artifact_dict(art_dict: dict[str, Any]) -> dict[str, Any]:
         return _enrich_artifact_dict(art_dict)
 
+    @staticmethod
+    def _describe_single_cli_command(cmd_str: str, fallback: str) -> str:
+        """Produce a specific per-command summary for the CLI Audit Drawer."""
+        c = (cmd_str or "").strip()
+        if "list-services" in c:
+            return "Enumerated active ECS services in cluster."
+        if "describe-services" in c:
+            m = re.search(r"--services\s+([^\s]+)", c)
+            svc_label = m.group(1) if m else "ECS service"
+            return f"Inspected live ECS service state, task counts, and active revision for {svc_label}."
+        if "describe-task-definition" in c:
+            m = re.search(r"--task-definition\s+([^\s]+)", c)
+            rev_label = m.group(1) if m else "task definition"
+            return f"Inspected container definitions and environment variables for {rev_label}."
+        if "filter-log-events" in c:
+            m = re.search(r"--log-group-name\s+([^\s]+)", c)
+            lg_label = m.group(1) if m else "CloudWatch log group"
+            return f"Queried CloudWatch structured log events from {lg_label}."
+        if "get-role-policy" in c:
+            return "Inspected IAM role policy statements (ReadOnlyDiagnostics, AllowlistedServiceRemediation, ExplicitDenyDestructiveOperations)."
+        return fallback
+
     def _audit_slice_to_records(
         self,
         audit_slice: list[dict[str, Any]],
@@ -248,13 +394,26 @@ class CloudOpsOrchestrator:
     ) -> list[ExecutedCommandRecord]:
         records: list[ExecutedCommandRecord] = []
         clean_summary = (output_summary or "").strip()[:600]
+        multi = len(audit_slice) > 1
         for offset, entry in enumerate(audit_slice):
             allowed = bool(entry.get("allowed", True))
             cat = str(entry.get("category", ""))
+            cmd_str = str(entry.get("command", ""))
             if allowed:
                 status = "ALLOWED"
                 exec_mode = "LIVE_AWS" if self.config.live_aws else "SIMULATION"
-                summary = clean_summary or str(entry.get("reason", ""))[:600]
+                if clean_summary.upper().startswith("BLOCKED"):
+                    summary = self._describe_single_cli_command(
+                        cmd_str,
+                        str(entry.get("reason", "Executed read-only AWS CLI command."))[:600],
+                    )
+                elif multi and offset < len(audit_slice) - 1:
+                    summary = self._describe_single_cli_command(cmd_str, clean_summary)
+                else:
+                    summary = clean_summary or self._describe_single_cli_command(
+                        cmd_str,
+                        str(entry.get("reason", ""))[:600],
+                    )
             else:
                 status = "REQUIRES_APPROVAL" if cat == "WRITE_REQUIRES_APPROVAL" else "BLOCKED"
                 exec_mode = "BLOCKED"
@@ -263,7 +422,7 @@ class CloudOpsOrchestrator:
                 ExecutedCommandRecord(
                     index=start_index + offset,
                     tool_name=tool_name,
-                    command=str(entry.get("command", "")),
+                    command=cmd_str,
                     status=status,
                     execution_mode=exec_mode,
                     output_summary=summary,
@@ -303,9 +462,7 @@ class CloudOpsOrchestrator:
         conversation_id: str | None = None,
     ) -> IncidentRecord:
         """Execute an approved RemediationProposal, run VerifierAgent, and persist to Incident Memory."""
-        if incident_id not in self.incidents:
-            raise KeyError(f"Unknown incident_id '{incident_id}'")
-        incident = self.incidents[incident_id]
+        incident = self._resolve_incident(incident_id, conversation_id=conversation_id)
         if incident.proposal is None:
             raise ValueError(f"Incident '{incident_id}' has no RemediationProposal to approve.")
 
@@ -425,15 +582,15 @@ class CloudOpsOrchestrator:
             followup_msg = ChatMessageRecord(
                 role="assistant",
                 content=(
-                    f"### ✅ Remediation Executed & Verified (`{incident.incident_id}`)\n\n"
-                    f"- **Approved By:** `{approver}` (`{exec_result['approval_token']}`)\n"
+                    f"Remediation executed and verified on `{incident.service}`.\n\n"
+                    f"- **Approved By:** `{approver}`\n"
                     f"- **Executed Command:** `{incident.proposal.aws_cli_equivalent}`\n"
                     f"- **Verification Status:** **{incident.status}** — "
                     f"{incident.verification.summary if incident.verification else ''}"
                 ),
                 executed_commands=cmd_records,
                 incident_id=incident.incident_id,
-                proposal=prop_dict,
+                proposal=None,
                 verification=ver_dict,
                 artifacts=[],
             )
@@ -453,9 +610,7 @@ class CloudOpsOrchestrator:
         conversation_id: str | None = None,
     ) -> IncidentRecord:
         """Reject a pending remediation proposal without executing any ECS write operations."""
-        if incident_id not in self.incidents:
-            raise KeyError(f"Unknown incident_id '{incident_id}'")
-        incident = self.incidents[incident_id]
+        incident = self._resolve_incident(incident_id, conversation_id=conversation_id)
         incident.status = "REJECTED"
         incident.updated_at = utc_now_iso()
         if incident.proposal is not None:
@@ -482,13 +637,12 @@ class CloudOpsOrchestrator:
             followup_msg = ChatMessageRecord(
                 role="assistant",
                 content=(
-                    f"### 🚫 Remediation Proposal Cancelled (`{incident.incident_id}`)\n\n"
                     f"Cancelled proposed change on `{incident.service}`: {reason}. "
                     f"No mutating AWS CLI commands were executed."
                 ),
                 executed_commands=[],
                 incident_id=incident.incident_id,
-                proposal=prop_dict,
+                proposal=None,
             )
             self.conversation_store.append_message(
                 conversation_id=target_conv_id,
@@ -501,9 +655,7 @@ class CloudOpsOrchestrator:
 
     def generate_artifacts(self, incident_id: str) -> list[ArtifactRecord]:
         """Generate Excel (.xlsx), Chart (.svg), Word (.docx), and Markdown (.md) artifacts for an incident."""
-        if incident_id not in self.incidents:
-            raise KeyError(f"Unknown incident_id '{incident_id}'")
-        incident = self.incidents[incident_id]
+        incident = self._resolve_incident(incident_id)
 
         excel_art = generate_excel_timeline(incident, self.config.artifacts_dir)
         chart_art = generate_metric_chart(incident, self.config.artifacts_dir)
@@ -918,7 +1070,7 @@ class CloudOpsOrchestrator:
             updated_sess = self.conversation_store.get_or_create_active(session.conversation_id)
             last_msg = updated_sess.messages[-1] if updated_sess.messages else user_msg
             reply_str = (
-                f"Approved and executed remediation for `{inc.incident_id}`. "
+                f"Approved and executed remediation for `{inc.service}`. "
                 f"Verifier status: **{inc.status}** — "
                 f"{inc.verification.summary if inc.verification else ''}"
             )
@@ -984,19 +1136,38 @@ class CloudOpsOrchestrator:
                     attachments=attachments,
                 )
                 turn_incident = inc
-                if inc.proposal:
-                    turn_proposal = inc.proposal.to_dict()
                 inv = inc.investigation
+                err_pct = float((inv.metrics_snapshot if inv else {}).get("error_rate_pct", 0.0) or 0.0)
+                is_healthy_svc = inc.scenario == "healthy" and err_pct == 0.0
+                is_report_only_request = any(
+                    kw in lower for kw in ("report", "excel", "word", "docx", "xlsx", "markdown", "export")
+                ) and not any(
+                    kw in lower for kw in ("fix", "remediat", "rollback", "roll back", "scale", "resolve")
+                )
+                if inc.proposal and not is_healthy_svc and not is_report_only_request:
+                    turn_proposal = inc.proposal.to_dict()
                 output_summary = (
-                    f"Investigated {svc} ({inc.incident_id}): {inv.summary if inv else inc.title}"
+                    f"Investigated {svc}: {inv.summary if inv else inc.title}"
                 )
                 primary_intent = "investigate_incident"
+                inv_llm = inv.to_dict() if inv else None
+                if isinstance(inv_llm, dict):
+                    inv_llm.pop("incident_id", None)
+                    if isinstance(inv_llm.get("matched_past_incident"), dict):
+                        inv_llm["matched_past_incident"] = {
+                            k: v
+                            for k, v in inv_llm["matched_past_incident"].items()
+                            if k != "incident_id"
+                        }
+                prop_llm = dict(turn_proposal) if isinstance(turn_proposal, dict) else None
+                if isinstance(prop_llm, dict):
+                    prop_llm.pop("proposal_id", None)
+                    prop_llm.pop("incident_id", None)
                 result_payload = {
-                    "incident_id": inc.incident_id,
                     "service": svc,
                     "status": inc.status,
-                    "investigation": inv.to_dict() if inv else None,
-                    "proposal": turn_proposal,
+                    "investigation": inv_llm,
+                    "proposal": prop_llm,
                 }
 
             elif tool_name == "get_service_logs_and_metrics":
@@ -1116,13 +1287,16 @@ class CloudOpsOrchestrator:
                 if inc.proposal:
                     turn_proposal = inc.proposal.to_dict()
                 output_summary = (
-                    f"Prepared approval-gated proposal {inc.proposal.proposal_id if inc.proposal else ''}: "
+                    f"Prepared approval-gated proposal: "
                     f"{inc.proposal.title if inc.proposal else inc.title}"
                 )
+                prop_llm = dict(turn_proposal) if isinstance(turn_proposal, dict) else None
+                if isinstance(prop_llm, dict):
+                    prop_llm.pop("proposal_id", None)
+                    prop_llm.pop("incident_id", None)
                 result_payload = {
-                    "incident_id": inc.incident_id,
                     "service": svc,
-                    "proposal": turn_proposal,
+                    "proposal": prop_llm,
                     "scaling_policy": turn_scaling_policy,
                 }
 
@@ -1294,8 +1468,6 @@ class CloudOpsOrchestrator:
                         attachments=attachments,
                     )
                 turn_incident = inc
-                if inc.proposal:
-                    turn_proposal = inc.proposal.to_dict()
 
                 inc_chart = args.get("include_chart")
                 inc_excel = args.get("include_excel")
@@ -1311,20 +1483,20 @@ class CloudOpsOrchestrator:
                 if inc_excel:
                     records.append(generate_excel_timeline(inc, self.config.artifacts_dir))
                 if inc_word or inc_md:
-                    pir_recs = generate_pir_documents(inc, self.config.artifacts_dir)
-                    for r in pir_recs:
-                        if (r.kind == "word_pir" and inc_word) or (r.kind == "markdown_pir" and inc_md):
-                            records.append(r)
+                    docx_rec, md_rec = generate_post_incident_report(inc, self.config.artifacts_dir)
+                    if inc_word:
+                        records.append(docx_rec)
+                    if inc_md:
+                        records.append(md_rec)
                 inc.artifacts = records
                 for rec in records:
                     add_artifact_Once(rec.to_dict())
                 primary_intent = "generate_artifacts"
                 output_summary = (
-                    f"Generated {len(records)} operational artifact(s) for {inc.incident_id} ({svc}): "
+                    f"Generated {len(records)} operational artifact(s) for {svc}: "
                     + ", ".join(r.name for r in records)
                 )
                 result_payload = {
-                    "incident_id": inc.incident_id,
                     "service": svc,
                     "artifacts": [_enrich_artifact_dict(r.to_dict()) for r in records],
                 }

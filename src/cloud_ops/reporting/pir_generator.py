@@ -71,10 +71,10 @@ def generate_post_incident_report(
     """Generate both an OpenXML .docx Word document and a formatted .md Post-Incident Report."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    safe_id = incident.incident_id.lower().replace(" ", "_")
+    safe_svc = incident.service.lower().replace(" ", "_")
 
-    docx_filename = f"incident_{safe_id}_pir.docx"
-    md_filename = f"incident_{safe_id}_pir.md"
+    docx_filename = f"{safe_svc}_post_incident_report.docx"
+    md_filename = f"{safe_svc}_post_incident_report.md"
     docx_path = out_dir / docx_filename
     md_path = out_dir / md_filename
 
@@ -111,7 +111,7 @@ def generate_post_incident_report(
             f"| `{a.get('timestamp', '')}` | `{a.get('actor', 'agent')}` | **{a.get('step', '')}** | {a.get('detail', '')} |"
         )
 
-    md_content = f"""# Post-Incident Report (PIR): {incident.incident_id}
+    md_content = f"""# Post-Incident Report (PIR): {incident.service}
 
 **Title:** {incident.title}  
 **Service:** `{incident.service}`  
@@ -139,11 +139,10 @@ def generate_post_incident_report(
 
 ## 4. Historical Memory Correlation
 
-{f"Matched past incident **{inv.matched_past_incident.get('incident_id')}** ({inv.matched_past_incident.get('title')}): {inv.matched_past_incident.get('resolution')}" if (inv and inv.matched_past_incident) else "No prior matching incident in Incident Memory."}
+{f"Matched past incident ({inv.matched_past_incident.get('title')}): {inv.matched_past_incident.get('resolution')}" if (inv and inv.matched_past_incident) else "No prior matching incident in Incident Memory."}
 
 ## 5. Guardrailed Remediation & Human Approval
 
-- **Proposal ID:** `{prop.proposal_id if prop else 'N/A'}`
 - **Action:** {prop.title if prop else 'N/A'}
 - **MCP Tool:** `{prop.mcp_tool if prop else 'N/A'}`
 - **AWS CLI Equivalent:** `{prop.aws_cli_equivalent if prop else 'N/A'}`
@@ -172,7 +171,7 @@ def generate_post_incident_report(
 
     # 2. Build OpenXML .docx document
     paragraphs: list[str] = [
-        _w_para(f"Post-Incident Report (PIR): {incident.incident_id}", style="Heading1"),
+        _w_para(f"Post-Incident Report (PIR): {incident.service}", style="Heading1"),
         _w_para(f" {incident.title}", bold_prefix="Title:"),
         _w_para(f" {incident.service} (Scenario: {incident.scenario})", bold_prefix="Service:"),
         _w_para(f" {incident.status}", bold_prefix="Status:"),

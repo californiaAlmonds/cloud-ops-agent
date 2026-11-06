@@ -141,7 +141,7 @@ class InvestigatorAgent:
                 "tool": "memory_store.find_similar_incidents & multimodal_ingestor.ingest",
                 "finding": (
                     f"Matched historical incident: "
-                    f"{matched_past['incident_id'] if matched_past else 'None'}. "
+                    f"{matched_past.get('title') if matched_past else 'None'}. "
                     f"Processed {len(multimodal_insights)} multimodal attachment insight(s)."
                 ),
             }

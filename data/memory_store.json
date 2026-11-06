@@ -1,13 +1,13 @@
 {
-  "updated_at": "2026-10-26T14:15:38Z",
+  "updated_at": "2026-11-03T08:28:32Z",
   "past_incidents": [
     {
       "incident_id": "INC-2026-1101",
       "title": "salescreate-api incident: bad-release (35.0% errors)",
       "service": "salescreate-api",
       "scenario": "bad-release",
-      "occurred_at": "2026-10-26T14:15:38Z",
-      "resolved_at": "2026-10-26T14:15:38Z",
+      "occurred_at": "2026-11-03T08:22:32Z",
+      "resolved_at": "2026-11-03T08:24:43Z",
       "error_signature": "KeyError: 'discount_tier' in checkout_pricing.calculate_tier_discount (introduced in v2.4.1-bad)",
       "root_cause": "Active task definition salescreate-api:15 on salescreate-api introduced configuration/release drift (RELEASE_VERSION: 'v2.4.0' -> 'v2.4.1-bad') compared to healthy baseline salescreate-api:14, triggering KeyError: KeyError: 'discount_tier' in checkout_pricing.calculate_tier_discount (introduced in v2.4.1-bad).",
       "resolution": "Roll back salescreate-api task definition from salescreate-api:15 to healthy baseline salescreate-api:14",
@@ -150,5 +150,13 @@
       }
     }
   },
-  "scaling_history": []
+  "scaling_history": [
+    {
+      "incident_id": "INC-2026-1106",
+      "service": "salescreate-api",
+      "desired_count": 1,
+      "approver": "ops-engineer@cloudops.io",
+      "timestamp": "2026-11-03T08:28:32Z"
+    }
+  ]
 }

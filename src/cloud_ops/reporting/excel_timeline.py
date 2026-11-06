@@ -124,8 +124,8 @@ def generate_excel_timeline(
     """Generate a 3-sheet OpenXML .xlsx workbook detailing the incident timeline and metrics."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    safe_id = incident.incident_id.lower().replace(" ", "_")
-    filename = f"incident_{safe_id}_timeline.xlsx"
+    safe_svc = incident.service.lower().replace(" ", "_")
+    filename = f"{safe_svc}_timeline.xlsx"
     out_path = out_dir / filename
 
     inv = incident.investigation
@@ -135,7 +135,6 @@ def generate_excel_timeline(
     # Sheet 1: Incident Summary
     sheet1_rows: list[list[Any]] = [
         ["Field", "Value", "Notes"],
-        ["Incident ID", incident.incident_id, "Primary incident identifier"],
         ["Title", incident.title, "Operational incident headline"],
         ["Target Service", incident.service, "AWS ECS Fargate microservice"],
         ["Fault Scenario", incident.scenario, "Active or remediated scenario"],
@@ -159,7 +158,7 @@ def generate_excel_timeline(
         [
             "Matched Historical Incident",
             (
-                f"{inv.matched_past_incident.get('incident_id')} - {inv.matched_past_incident.get('title')}"
+                f"{inv.matched_past_incident.get('title')}"
                 if (inv and inv.matched_past_incident)
                 else "None"
             ),

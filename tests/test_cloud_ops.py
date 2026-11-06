@@ -209,7 +209,7 @@ class TestCloudOpsAgentBackend(unittest.TestCase):
             self.assertIn("[Content_Types].xml", names)
             self.assertIn("word/document.xml", names)
             doc_xml = zf.read("word/document.xml").decode("utf-8")
-            self.assertIn(incident.incident_id, doc_xml)
+            self.assertIn(incident.service, doc_xml)
 
         # Verify SVG chart contains valid <svg> markup and phase annotations
         svg_path = Path(by_kind["chart"].path)

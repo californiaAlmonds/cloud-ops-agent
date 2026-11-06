@@ -380,11 +380,8 @@ class GeminiReasoningEngine:
                 f"{first_error_type or scenario}: {first_error_msg or scenario}."
             )
             past_note = ""
-            if past_incident and past_incident.get("incident_id"):
-                past_note = (
-                    f" Correlated with historical incident {past_incident['incident_id']} "
-                    f"({past_incident.get('title', '')})."
-                )
+            if past_incident and past_incident.get("title"):
+                past_note = f" Correlated with historical incident ({past_incident.get('title', '')})."
             mm_note = ""
             if multimodal_insights:
                 mm_note = f" Runbook/diagram context incorporated ({len(multimodal_insights)} artifact insight(s))."
@@ -758,7 +755,7 @@ class GeminiReasoningEngine:
             policy = scale_res.get("scaling_policy") or {}
             window_str = f" ({policy.get('window')})" if policy.get("window") else ""
             reply = (
-                f"Prepared {period.replace('_', ' ')} scaling proposal `{prop.get('proposal_id', '')}` "
+                f"Prepared {period.replace('_', ' ')} scaling proposal "
                 f"for `{target_svc}`{window_str}: "
                 f"`desired_count={prop.get('parameters', {}).get('desired_count', target_count)}`.\n"
                 f"Command: `{prop.get('aws_cli_equivalent', '')}`"

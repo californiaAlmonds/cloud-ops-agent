@@ -744,13 +744,16 @@ function renderInlineProposal(proposal, incidentId) {
   const status = String(proposal.status || "PENDING_APPROVAL").toUpperCase();
   const isPending = status === "PENDING_APPROVAL";
   const isApproved = status === "APPROVED" || status === "APPROVED_AND_EXECUTED";
+  const isRejected = status === "REJECTED" || status === "CANCELLED";
   const cardStateClass = isPending
     ? "status-pending"
     : isApproved
     ? "status-approved"
     : "status-rejected";
   const pillStateClass = isPending ? "pending" : isApproved ? "approved" : "rejected";
-  const resolvedIncidentId = incidentId || proposal.incident_id || "";
+  const pillText = isRejected ? "CANCELLED" : status;
+  const resolvedIncidentId =
+    incidentId || proposal.incident_id || proposal.proposal_id || proposal.service || "active";
 
   return `
     <section class="inline-approval-card ${cardStateClass}" aria-label="Remediation Approval Request">
@@ -759,13 +762,15 @@ function renderInlineProposal(proposal, incidentId) {
           <span aria-hidden="true">${isApproved ? "✅" : isPending ? "🛡️" : "✕"}</span>
           <span>${escapeHtml(proposal.title || "Proposed AWS Service Change")}</span>
         </h3>
-        <span class="proposal-status-pill ${pillStateClass}">${escapeHtml(status)}</span>
+        <span class="proposal-status-pill ${pillStateClass}">${escapeHtml(pillText)}</span>
       </div>
 
       <p class="proposal-explanation">
         ${escapeHtml(
-          proposal.blast_radius ||
-            "This action modifies an Amazon ECS service and requires your explicit approval before executing."
+          isRejected
+            ? "Cancelled by operator — no mutating AWS CLI commands were executed."
+            : proposal.blast_radius ||
+                "This action modifies an Amazon ECS service and requires your explicit approval before executing."
         )}
       </p>
 
@@ -792,7 +797,7 @@ function renderInlineProposal(proposal, incidentId) {
       </details>
 
       ${
-        isPending && resolvedIncidentId
+        isPending
           ? `<div class="approval-actions-row">
               <button
                 type="button"
@@ -1133,9 +1138,14 @@ async function handleInlineApprove(incidentId, conversationId, buttonEl) {
 
 async function handleInlineReject(incidentId, conversationId, buttonEl) {
   if (!incidentId) return;
+  const cardEl = buttonEl ? buttonEl.closest(".inline-approval-card") : null;
   if (buttonEl) {
     buttonEl.disabled = true;
     buttonEl.textContent = "Cancelling...";
+  }
+  if (cardEl) {
+    const approveBtn = cardEl.querySelector("[data-approve-incident]");
+    if (approveBtn) approveBtn.disabled = true;
   }
   try {
     const res = await apiPost(
@@ -1153,7 +1163,23 @@ async function handleInlineReject(incidentId, conversationId, buttonEl) {
       await selectConversation(state.activeConversationId);
     }
   } catch (err) {
-    if (buttonEl) {
+    // Even if the incident was from an older session not found on backend, mark card cancelled in UI
+    if (cardEl) {
+      cardEl.classList.remove("status-pending");
+      cardEl.classList.add("status-rejected");
+      const pill = cardEl.querySelector(".proposal-status-pill");
+      if (pill) {
+        pill.className = "proposal-status-pill rejected";
+        pill.textContent = "CANCELLED";
+      }
+      const explanation = cardEl.querySelector(".proposal-explanation");
+      if (explanation) {
+        explanation.textContent =
+          "Cancelled by operator — no mutating AWS CLI commands were executed.";
+      }
+      const actionsRow = cardEl.querySelector(".approval-actions-row");
+      if (actionsRow) actionsRow.remove();
+    } else if (buttonEl) {
       buttonEl.disabled = false;
       buttonEl.textContent = "✕ Cancel";
     }

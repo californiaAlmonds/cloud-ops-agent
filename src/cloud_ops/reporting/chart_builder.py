@@ -244,8 +244,8 @@ def generate_metric_chart(
     output_dir: Path | str,
 ) -> ArtifactRecord:
     """Generate a phase-aware SVG chart from the incident's actual CloudWatch logs and verification state."""
-    safe_id = incident.incident_id.lower().replace(" ", "_")
-    filename = f"incident_{safe_id}_metrics.svg"
+    safe_svc = incident.service.lower().replace(" ", "_")
+    filename = f"{safe_svc}_metrics.svg"
 
     inv = incident.investigation
     ver = incident.verification
@@ -328,7 +328,7 @@ def generate_metric_chart(
         )
 
     return render_custom_svg_chart(
-        title=f"CloudWatch Telemetry: {incident.service} ({incident.incident_id})",
+        title=f"CloudWatch Telemetry: {incident.service}",
         subtitle=subtitle,
         x_labels=labels,
         series=[

@@ -219,6 +219,32 @@ class TestCloudOpsAPIServer(unittest.TestCase):
         self.assertEqual(d_status, 200)
         self.assertTrue(del_res["deleted"])
 
+        # 5. Test Cancel/Reject inline after server restart (clearing in-memory incidents)
+        self._post_json(
+            "/api/scenarios/inject",
+            {"service": "salescreate-api", "scenario": "bad-release"},
+        )
+        _, created_2 = self._post_json("/api/conversations", {"title": "Reject Test"})
+        conv_id_2 = created_2["conversation"]["conversation_id"]
+        _, chat_res_2 = self._post_json(
+            f"/api/conversations/{conv_id_2}/messages",
+            {"message": "Why is salescreate-api failing?"},
+        )
+        inc_id_2 = chat_res_2["message"]["incident_id"]
+        # Simulate server restart wiping in-memory incidents dict
+        self.orchestrator.incidents.clear()
+        r_status, rej_res = self._post_json(
+            f"/api/incidents/{inc_id_2}/reject",
+            {"reason": "Cancelled by operator in chat", "conversation_id": conv_id_2},
+        )
+        self.assertEqual(r_status, 200)
+        self.assertEqual(rej_res["incident"]["status"], "REJECTED")
+        rej_conv = rej_res["conversation"]
+        # Original message proposal status should now be REJECTED
+        self.assertEqual(rej_conv["messages"][1]["proposal"]["status"], "REJECTED")
+        # Follow-up message should not render a duplicate proposal card
+        self.assertIsNone(rej_conv["messages"][-1]["proposal"])
+
     def test_07_ui_sidebar_collapse_expand_contract(self) -> None:
         """Verify UI HTML, CSS, and JS include desktop & mobile sidebar collapse/expand controls."""
         status_html, html_bytes, _ = self._get("/")

@@ -502,7 +502,7 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
                 {
                     "type": "section",
                     "fields": [
-                        {"type": "mrkdwn", "text": f"*Incident ID:*\n`{incident_id}`"},
+                        {"type": "mrkdwn", "text": f"*Service:*\n`{chat_res.get('service') or 'ecs'}`"},
                         {"type": "mrkdwn", "text": f"*Approval Status:*\n`{proposal.get('status')}`"},
                         {"type": "mrkdwn", "text": f"*MCP Tool:*\n`{proposal.get('mcp_tool')}`"},
                         {"type": "mrkdwn", "text": f"*CLI Command:*\n`{proposal.get('aws_cli_equivalent')}`"},
@@ -533,7 +533,7 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
         facts = [
             {"title": "Operator", "value": user_name},
             {"title": "Model", "value": self.orchestrator.config.gemini_model},
-            {"title": "Incident ID", "value": str(incident_id)},
+            {"title": "Service", "value": str(chat_res.get("service") or "ecs")},
             {"title": "Intent", "value": str(chat_res.get("intent", "investigate"))},
         ]
         if proposal:
