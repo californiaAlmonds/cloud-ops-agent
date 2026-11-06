@@ -235,6 +235,8 @@ class CloudWatchMCPServer:
                     if isinstance(latest_fault, str) and latest_fault.strip():
                         self.active_scenarios[svc] = latest_fault.strip()
                     return live_events
+            # Live mode never falls back to synthetic telemetry: no events means no evidence.
+            return []
 
         env = self.get_resolved_env(svc, target_scenario)
         now = datetime.now(timezone.utc)
@@ -370,6 +372,12 @@ class CloudWatchMCPServer:
             "release": release,
             "status": health_state,
             "sample_size": total,
+            "log_events": len(logs),
+            "latency_reported": any(bool(e.get("latency_ms")) for e in logs),
+            "memory_reported": any(
+                bool((e.get("metrics") or {}).get("memory_rss_mb") or (e.get("metrics") or {}).get("memory_used_mb"))
+                for e in logs
+            ),
             "error_count": error_count,
             "error_rate_pct": error_rate_pct,
             "avg_latency_ms": avg_latency_ms,

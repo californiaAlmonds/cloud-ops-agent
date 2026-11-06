@@ -5,6 +5,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -12,7 +13,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from cloud_ops.config import AgentConfig
 from cloud_ops.mcp_servers.cloudwatch_mcp import SUPPORTED_SERVICES
-from cloud_ops.orchestrator import CloudOpsOrchestrator
+from cloud_ops.mcp_servers.ecs_mcp import RemediationExecutionError
+from cloud_ops.orchestrator import CloudOpsOrchestrator, ProposalStateError
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
@@ -42,6 +44,18 @@ _CONVERSATION_MESSAGES_RE = re.compile(
 )
 
 _DEFAULT_ORCHESTRATOR: CloudOpsOrchestrator | None = None
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_PRIVATE_LLM_KEYS = ("vertex_project", "adc_credentials_path")
+
+
+def _public_llm_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Drop project ids and local credential paths from the status shown to API clients."""
+    return {k: v for k, v in status.items() if k not in _PRIVATE_LLM_KEYS}
+
+
+def _env_set(name: str) -> set[str]:
+    return {item.strip().lower().rstrip("/") for item in os.environ.get(name, "").split(",") if item.strip()}
 
 
 def get_default_orchestrator() -> CloudOpsOrchestrator:
@@ -84,10 +98,54 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
     # CORS & Response Helpers
     # -------------------------------------------------------------------------
 
+    def _request_hostname(self) -> str:
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.startswith("["):  # [::1]:8000
+            return host[1:].split("]")[0]
+        return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+    def _host_ok(self) -> bool:
+        """Reject DNS-rebinding: the Host header must be this machine (or an allow-listed name)."""
+        if os.environ.get("VERCEL"):
+            return True  # serverless host names are not known up front
+        try:
+            bound = str(self.server.server_address[0])
+        except Exception:
+            bound = ""
+        if bound in ("0.0.0.0", "::"):
+            return True  # the operator deliberately exposed the server on all interfaces
+        allowed = set(_LOOPBACK_HOSTS) | _env_set("CLOUD_OPS_ALLOWED_HOSTS")
+        if bound:
+            allowed.add(bound.lower())
+        return self._request_hostname() in allowed
+
+    def _origin_ok(self, origin: str | None) -> bool:
+        """Browsers always send Origin on cross-site writes; only same-origin or allow-listed pass."""
+        if not origin:
+            return True  # curl, Slack/Teams webhooks and tests send no Origin header
+        if origin.strip().lower() == "null":
+            return False
+        if urlparse(origin).netloc.lower() == (self.headers.get("Host") or "").strip().lower():
+            return True
+        return origin.strip().lower().rstrip("/") in _env_set("CLOUD_OPS_ALLOWED_ORIGINS")
+
+    def _guard_request(self) -> bool:
+        """Block cross-site and rebinding requests before any handler logic runs."""
+        if not self._host_ok():
+            self._send_json({"error": "Host header not allowed"}, status=HTTPStatus.FORBIDDEN)
+            return False
+        if self.command != "GET" and not self._origin_ok(self.headers.get("Origin")):
+            self._send_json({"error": "Cross-origin request blocked"}, status=HTTPStatus.FORBIDDEN)
+            return False
+        return True
+
     def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        origin = self.headers.get("Origin")
+        if origin and self._origin_ok(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def _send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -136,11 +194,15 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------------------
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if not self._guard_request():
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_cors_headers()
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._guard_request():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -164,7 +226,7 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
                     {
                         "status": "ok",
                         "model": self.orchestrator.config.gemini_model,
-                        "llm_status": self.orchestrator.gemini.status_summary(),
+                        "llm_status": _public_llm_status(self.orchestrator.gemini.status_summary()),
                         "cluster": self.orchestrator.config.ecs_cluster,
                         "region": self.orchestrator.config.aws_region,
                         "live_aws": self.orchestrator.config.live_aws,
@@ -212,6 +274,8 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._guard_request():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         body = self._read_json_body()
@@ -308,7 +372,7 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
                     conversation_id = str(conversation_id).strip() or None
 
                 if action == "approve":
-                    approver = str(body.get("approver") or "sre-oncall@cloudops.io")
+                    approver = str(body.get("approver") or "sre-oncall@cloudops.io")[:120]
                     incident = self.orchestrator.approve_remediation(
                         incident_id=incident_id,
                         approver=approver,
@@ -338,6 +402,7 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
                         incident_id=incident_id,
                         reason=reason,
                         conversation_id=conversation_id,
+                        rejected_by=str(body.get("rejected_by") or body.get("approver") or "ops-engineer@team")[:120],
                     )
                     target_conv_id = (
                         conversation_id
@@ -387,12 +452,18 @@ class CloudOpsRequestHandler(BaseHTTPRequestHandler):
             )
         except KeyError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+        except ProposalStateError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+        except RemediationExecutionError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_GATEWAY)
         except (ValueError, PermissionError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self._guard_request():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 

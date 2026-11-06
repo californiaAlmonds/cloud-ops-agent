@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from typing import Any
 
+from cloud_ops.approvals import ApprovalLedger
 from cloud_ops.llm.gemini_engine import GeminiReasoningEngine
 from cloud_ops.mcp_servers.ecs_mcp import ECSMCPServer
 from cloud_ops.schemas import InvestigationReport, RemediationProposal, utc_now_iso
-
-APPROVAL_SIGNING_KEY = b"cloud-ops-agent-human-approval-hmac-key-2026"
 
 ROLLBACK_SCENARIOS = frozenset(
     {"bad-release", "memory-leak", "template-error", "poison-message"}
@@ -20,8 +17,13 @@ ROLLBACK_SCENARIOS = frozenset(
 class RemediatorAgent:
     """Proposes least-privilege ECS remediations and executes them only with a valid approval token."""
 
-    def __init__(self, gemini_engine: GeminiReasoningEngine | None = None) -> None:
+    def __init__(
+        self,
+        gemini_engine: GeminiReasoningEngine | None = None,
+        approval_ledger: ApprovalLedger | None = None,
+    ) -> None:
         self.gemini = gemini_engine or GeminiReasoningEngine()
+        self.approval_ledger = approval_ledger or ApprovalLedger()
 
     def propose_remediation(
         self,
@@ -43,7 +45,9 @@ class RemediatorAgent:
         release_changed = bool(
             diff and diff.release_change.get("changed") == "true"
         )
-        if scenario in ROLLBACK_SCENARIOS or release_changed:
+        # Live env-var updates are not implemented against real AWS yet, so in live mode the
+        # only fix proposed is a rollback to the known-good revision.
+        if scenario in ROLLBACK_SCENARIOS or release_changed or ecs_mcp.live_aws:
             action_type = "ROLLBACK_TASK_DEFINITION"
             mcp_tool = "rollback_task_definition"
             parameters: dict[str, Any] = {
@@ -149,11 +153,9 @@ class RemediatorAgent:
             status="PENDING_APPROVAL",
         )
 
-    def generate_approval_token(self, proposal_id: str, approver: str) -> str:
-        """Generate a cryptographic HMAC-SHA256 human approval token for a proposal."""
-        msg = f"{proposal_id}:{approver}".encode("utf-8")
-        digest = hmac.new(APPROVAL_SIGNING_KEY, msg, hashlib.sha256).hexdigest()[:18]
-        return f"appr-{digest}"
+    def generate_approval_token(self, proposal_id: str, approver: str, uses: int = 1) -> str:
+        """Issue a random, expiring approval token bound to this proposal and approver."""
+        return self.approval_ledger.issue(proposal_id=proposal_id, approver=approver, uses=uses)
 
     def execute_approved(
         self,
@@ -162,7 +164,11 @@ class RemediatorAgent:
         ecs_mcp: ECSMCPServer,
     ) -> dict[str, Any]:
         """Generate a verified approval token and invoke the allowlisted ECSMCPServer write tool."""
-        approval_token = self.generate_approval_token(proposal.proposal_id, approver)
+        approval_token = self.generate_approval_token(
+            proposal.proposal_id,
+            approver,
+            uses=2 if proposal.mcp_tool == "update_service_env" else 1,  # register + update-service
+        )
         tool_name = proposal.mcp_tool
         params = proposal.parameters
 

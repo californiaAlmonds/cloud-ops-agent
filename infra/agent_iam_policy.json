@@ -32,23 +32,24 @@
       "Resource": "*"
     },
     {
-      "Sid": "RemediatorAllowlistedWriteOnDemoCluster",
+      "Sid": "RemediatorUpdateServiceOnDemoCluster",
       "Effect": "Allow",
       "Action": [
-        "ecs:UpdateService",
-        "ecs:RegisterTaskDefinition"
+        "ecs:UpdateService"
       ],
       "Resource": [
-        "arn:aws:ecs:*:*:cluster/cloud-ops-demo-cluster",
-        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/*",
         "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/salescreate-api",
         "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/inventory-worker",
-        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/notifier",
-        "arn:aws:ecs:*:*:task-definition/*:*",
-        "arn:aws:ecs:*:*:task-definition/salescreate-api:*",
-        "arn:aws:ecs:*:*:task-definition/inventory-worker:*",
-        "arn:aws:ecs:*:*:task-definition/notifier:*"
+        "arn:aws:ecs:*:*:service/cloud-ops-demo-cluster/notifier"
       ]
+    },
+    {
+      "Sid": "RemediatorRegisterTaskDefinition",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RegisterTaskDefinition"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "PassTaskExecutionRoleOnly",

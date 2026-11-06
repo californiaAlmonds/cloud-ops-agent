@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +20,19 @@ BASELINE_REVISIONS: dict[str, int] = {
     "notifier": 11,
 }
 _SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class RemediationExecutionError(RuntimeError):
+    """An approved remediation could not be carried out against the target environment."""
+
+
+def baseline_revision_number(service: str) -> int:
+    """Known-good revision number; CLOUD_OPS_BASELINE_REVISIONS="svc=3,other=5" overrides defaults."""
+    for part in os.environ.get("CLOUD_OPS_BASELINE_REVISIONS", "").split(","):
+        name, _, num = part.strip().partition("=")
+        if name.strip() == service and num.strip().isdigit():
+            return int(num.strip())
+    return BASELINE_REVISIONS.get(service, 10)
 
 
 class ECSMCPServer:
@@ -58,7 +72,7 @@ class ECSMCPServer:
     def get_active_revision(self, service: str) -> str:
         """Return the active task definition revision string (`<service>:<rev>`) for a service."""
         svc = self._validate_service(service)
-        base_num = BASELINE_REVISIONS.get(svc, 10)
+        base_num = baseline_revision_number(svc)
         scenario = self.cloudwatch.get_service_scenario(svc)
         if scenario == "healthy":
             return f"{svc}:{base_num}"
@@ -69,7 +83,7 @@ class ECSMCPServer:
     def get_baseline_revision(self, service: str) -> str:
         """Return the known-good healthy baseline task definition revision (`<service>:<rev>`)."""
         svc = self._validate_service(service)
-        base_num = BASELINE_REVISIONS.get(svc, 10)
+        base_num = baseline_revision_number(svc)
         return f"{svc}:{base_num}"
 
     # -------------------------------------------------------------------------
@@ -157,10 +171,18 @@ class ECSMCPServer:
         active_rev = self.get_active_revision(svc)
         base_rev = self.get_baseline_revision(svc)
         log_group = f"/ecs/cloud-ops-demo/{svc}"
+        rollout_state = "COMPLETED"
 
         if self.live_aws:
             live_svc = self._try_describe_live_ecs_service(svc)
+            if not live_svc:
+                rollout_state = "UNKNOWN"
             if live_svc:
+                primary = next(
+                    (d for d in (live_svc.get("deployments") or []) if d.get("status") == "PRIMARY"),
+                    None,
+                )
+                rollout_state = str((primary or {}).get("rolloutState") or "UNKNOWN")
                 desired = int(live_svc.get("desiredCount", desired))
                 running = int(live_svc.get("runningCount", running))
                 pending = int(live_svc.get("pendingCount", 0))
@@ -183,12 +205,17 @@ class ECSMCPServer:
                                 if item.get("name")
                             }
 
+        health_status = "HEALTHY" if scenario == "healthy" else "DEGRADED"
+        if self.live_aws and (rollout_state in ("IN_PROGRESS", "FAILED", "UNKNOWN") or running != desired):
+            health_status = "DEGRADED"
+
         return {
             "cluster": self.cluster,
             "service": svc,
             "status": "ACTIVE",
             "scenario": scenario,
-            "health_status": "HEALTHY" if scenario == "healthy" else "DEGRADED",
+            "health_status": health_status,
+            "rollout_state": rollout_state,
             "desired_count": desired,
             "running_count": running,
             "pending_count": pending,
@@ -408,7 +435,7 @@ class ECSMCPServer:
 
     def inspect_iam_role_permissions(self) -> dict[str, Any]:
         """Read infra/agent_iam_policy.json and summarize allowed read-only, write, and denied scopes."""
-        cmd = "aws iam get-role-policy --role-name cloud-ops-agent-role --policy-name CloudOpsGuardrails"
+        cmd = "aws iam list-attached-role-policies --role-name cloud-ops-agent-role"
         self.cli_guard.validate_command(cmd, actor="investigator-agent")
 
         raw_policy: dict[str, Any] = {"Version": "2012-10-17", "Statement": []}
@@ -471,6 +498,12 @@ class ECSMCPServer:
         svc = self._validate_service(service)
         self._require_approval_token(approval_token, "rollback_task_definition")
 
+        if self.live_aws and self._try_describe_live_task_definition(target_revision) is None:
+            raise RemediationExecutionError(
+                f"Rollback target '{target_revision}' was not found in AWS; refusing to proceed. "
+                "Set CLOUD_OPS_BASELINE_REVISIONS to the real known-good revision."
+            )
+
         previous_revision = self.get_active_revision(svc)
         aws_cli_cmd = (
             f"aws ecs update-service --cluster {self.cluster} "
@@ -485,6 +518,7 @@ class ECSMCPServer:
         )
         if not cli_res["allowed"]:
             raise PermissionError(cli_res["reason"])
+        self._require_success(cli_res, "rollback_task_definition")
 
         # Reset simulated scenario back to healthy so Verifier observes real healthy telemetry
         self.cloudwatch.set_service_scenario(svc, "healthy")
@@ -512,20 +546,29 @@ class ECSMCPServer:
         svc = self._validate_service(service)
         self._require_approval_token(approval_token, "update_service_env")
 
+        if self.live_aws:
+            raise RemediationExecutionError(
+                "Updating environment variables on real AWS is not supported yet; "
+                "roll back to the known-good task definition revision instead."
+            )
+
         previous_revision = self.get_active_revision(svc)
-        aws_cli_cmd = (
-            f"aws ecs register-task-definition --family {svc} --region {self.region} && "
+        register_cmd = f"aws ecs register-task-definition --family {svc} --region {self.region}"
+        update_cmd = (
             f"aws ecs update-service --cluster {self.cluster} --service {svc} "
             f"--force-new-deployment --region {self.region}"
         )
-        cli_res = self.cli_guard.execute_command(
-            aws_cli_cmd,
-            approval_token=approval_token,
-            live_aws=self.live_aws,
-            actor="remediator-agent",
-        )
-        if not cli_res["allowed"]:
-            raise PermissionError(cli_res["reason"])
+        for step_cmd in (register_cmd, update_cmd):
+            cli_res = self.cli_guard.execute_command(
+                step_cmd,
+                approval_token=approval_token,
+                live_aws=False,
+                actor="remediator-agent",
+            )
+            if not cli_res["allowed"]:
+                raise PermissionError(cli_res["reason"])
+            self._require_success(cli_res, "update_service_env")
+        aws_cli_cmd = f"{register_cmd} && {update_cmd}"
 
         # Reset service back to healthy baseline with corrected env overrides
         clean_overrides = dict(env_overrides)
@@ -571,6 +614,7 @@ class ECSMCPServer:
         )
         if not cli_res["allowed"]:
             raise PermissionError(cli_res["reason"])
+        self._require_success(cli_res, "scale_ecs_service")
 
         self.desired_counts[svc] = int(desired_count)
         return {
@@ -584,6 +628,13 @@ class ECSMCPServer:
             "aws_cli_command": aws_cli_cmd,
             "timestamp": utc_now_iso(),
         }
+
+    @staticmethod
+    def _require_success(cli_res: dict[str, Any], operation: str) -> None:
+        """Fail loudly when the AWS call did not actually succeed instead of reporting a fix."""
+        if not cli_res.get("executed") or int(cli_res.get("returncode", 1)) != 0:
+            detail = str(cli_res.get("stderr") or cli_res.get("reason") or "no error output")[:300]
+            raise RemediationExecutionError(f"'{operation}' did not complete: {detail}")
 
     def _require_approval_token(self, approval_token: str | None, operation: str) -> None:
         if not approval_token or not str(approval_token).strip():

@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import threading
 from typing import Any
 
 from cloud_ops.agents.investigator import InvestigatorAgent
 from cloud_ops.agents.remediator import RemediatorAgent
 from cloud_ops.agents.verifier import VerifierAgent
+from cloud_ops.approvals import ApprovalLedger
 from cloud_ops.config import AgentConfig
 from cloud_ops.llm.gemini_engine import GeminiReasoningEngine
 from cloud_ops.mcp_servers.aws_cli_guard import DENIED_DESTRUCTIVE_ACTIONS, GuardrailedAWSCLI
@@ -44,6 +46,10 @@ from cloud_ops.schemas import (
 )
 
 
+class ProposalStateError(ValueError):
+    """The requested approval action is not valid for the proposal's current state."""
+
+
 def _enrich_artifact_dict(art_dict: dict[str, Any]) -> dict[str, Any]:
     """Ensure url, preview_url, and download_url are present on an artifact dictionary."""
     enriched = dict(art_dict)
@@ -69,7 +75,12 @@ class CloudOpsOrchestrator:
             vertex_project=self.config.vertex_project,
             vertex_location=self.config.vertex_location,
         )
-        self.cli_guard = GuardrailedAWSCLI()
+        self.approval_ledger = ApprovalLedger()
+        self.cli_guard = GuardrailedAWSCLI(
+            allowed_cluster=self.config.ecs_cluster,
+            allowed_services=tuple(SUPPORTED_SERVICES),
+            approval_ledger=self.approval_ledger,
+        )
         self.cloudwatch = CloudWatchMCPServer(
             services_dir=self.config.services_dir,
             live_aws=self.config.live_aws,
@@ -96,11 +107,14 @@ class CloudOpsOrchestrator:
             gemini_engine=self.gemini,
             multimodal_ingestor=self.ingestor,
         )
-        self.remediator = RemediatorAgent(gemini_engine=self.gemini)
+        self.remediator = RemediatorAgent(
+            gemini_engine=self.gemini, approval_ledger=self.approval_ledger
+        )
         self.verifier = VerifierAgent(gemini_engine=self.gemini)
 
         self.incidents: dict[str, IncidentRecord] = {}
         self.active_incident_id: str | None = None
+        self._approval_lock = threading.Lock()
         self._incident_seq = 1100
         self._rehydrate_incidents_from_conversations()
 
@@ -466,12 +480,37 @@ class CloudOpsOrchestrator:
         if incident.proposal is None:
             raise ValueError(f"Incident '{incident_id}' has no RemediationProposal to approve.")
 
+        # Only a pending proposal can be approved, and only once (guards reject->approve,
+        # double clicks and replays). The lock makes the check-and-claim atomic.
+        with self._approval_lock:
+            if incident.proposal.status != "PENDING_APPROVAL":
+                raise ProposalStateError(
+                    f"Proposal {incident.proposal.proposal_id} is {incident.proposal.status}; "
+                    "only a PENDING_APPROVAL proposal can be approved."
+                )
+            incident.proposal.status = "EXECUTING"
+
         audit_start = len(self.cli_guard.audit_log)
-        exec_result = self.remediator.execute_approved(
-            proposal=incident.proposal,
-            approver=approver,
-            ecs_mcp=self.ecs,
-        )
+        try:
+            exec_result = self.remediator.execute_approved(
+                proposal=incident.proposal,
+                approver=approver,
+                ecs_mcp=self.ecs,
+            )
+        except Exception as exc:
+            # Nothing was changed (or the change failed): leave it retryable and say why.
+            incident.proposal.status = "PENDING_APPROVAL"
+            incident.updated_at = utc_now_iso()
+            incident.audit_trail.append(
+                {
+                    "timestamp": incident.updated_at,
+                    "actor": approver,
+                    "step": "remediation_failed",
+                    "status": "PENDING_APPROVAL",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
         incident.status = "REMEDIATED"
         incident.updated_at = utc_now_iso()
         incident.audit_trail.append(
@@ -508,15 +547,16 @@ class CloudOpsOrchestrator:
                         "passed": passed,
                     }
                 ],
-                rollback_triggered=not passed,
+                rollback_triggered=False,
                 summary=(
-                    f"VERIFIED: {incident.service} scaled to desired_count={observed_cnt} "
+                    f"{'VERIFIED' if passed else 'VERIFICATION FAILED'}: {incident.service} "
+                    f"scaled to desired_count={observed_cnt} "
                     f"(running_count={ecs_state.get('running_count')}) per Environment Memory policy."
                 ),
                 timestamp=utc_now_iso(),
             )
             incident.verification = verification
-            incident.status = "VERIFIED" if passed else "ROLLED_BACK"
+            incident.status = "VERIFIED" if passed else "VERIFICATION_FAILED"
             self.memory.scaling_history.append(
                 {
                     "incident_id": incident.incident_id,
@@ -541,7 +581,7 @@ class CloudOpsOrchestrator:
                 ecs_mcp=self.ecs,
             )
             incident.verification = verification
-            incident.status = "VERIFIED" if verification.verified else "ROLLED_BACK"
+            incident.status = "VERIFIED" if verification.verified else "VERIFICATION_FAILED"
             self.memory.record_resolved_incident(incident)
 
         incident.updated_at = utc_now_iso()
@@ -608,17 +648,24 @@ class CloudOpsOrchestrator:
         incident_id: str,
         reason: str = "Rejected by human operator",
         conversation_id: str | None = None,
+        rejected_by: str = "ops-engineer@team",
     ) -> IncidentRecord:
         """Reject a pending remediation proposal without executing any ECS write operations."""
         incident = self._resolve_incident(incident_id, conversation_id=conversation_id)
-        incident.status = "REJECTED"
+        with self._approval_lock:
+            if incident.proposal is not None and incident.proposal.status != "PENDING_APPROVAL":
+                raise ProposalStateError(
+                    f"Proposal {incident.proposal.proposal_id} is {incident.proposal.status}; "
+                    "only a PENDING_APPROVAL proposal can be rejected."
+                )
+            incident.status = "REJECTED"
+            if incident.proposal is not None:
+                incident.proposal.status = "REJECTED"
         incident.updated_at = utc_now_iso()
-        if incident.proposal is not None:
-            incident.proposal.status = "REJECTED"
         incident.audit_trail.append(
             {
                 "timestamp": incident.updated_at,
-                "actor": "ops-engineer@team",
+                "actor": rejected_by,
                 "step": "remediation_rejected",
                 "status": "REJECTED",
                 "detail": reason or "Operator declined proposed remediation.",
